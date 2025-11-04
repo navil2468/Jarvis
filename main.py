@@ -6,7 +6,7 @@ from RealtimeSTT import AudioToTextRecorder
 from elevenlabs.client import ElevenLabs
 from elevenlabs.play import play
 
-MAX_OUTPUT_TOKENS = 50
+MAX_OUTPUT_TOKENS = 75
 
 def main():
     load_dotenv()
@@ -30,7 +30,7 @@ def main():
     chat = client.chats.create(
         model='gemini-2.5-flash',
         config=types.GenerateContentConfig(
-            system_instruction="My name is Navil",
+            system_instruction="Your name is Jarvis, my personal AI assistant who helps me perform daily tsks to make my life easier",
             thinking_config=types.ThinkingConfig(
                 thinking_budget=0
             ),
