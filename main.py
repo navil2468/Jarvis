@@ -57,15 +57,20 @@ class AI_Core(QObject):
     text_received = Signal(str)
     end_of_turn = Signal()
     frame_received = Signal(QImage)
+    search_results_received = Signal(list)  # Signal to send search URLs
 
     def __init__(self, video_mode=DEFAULT_MODE):
         super().__init__()
         self.video_mode = video_mode
         self.is_running = True
         self.client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Add Google Search as a tool
+        tools = [{'google_search': {}}]
         self.config = {
             "response_modalities": ["TEXT"],
             "system_instruction": "Your name is Jarvis, which stands for Just a rather very intelligent system. You have a joking personality and are an Ai designed to help me with simple tasks on computer and occasionally programming help too. Adress me as Sir. Also keep replies precise and to the point.",
+            "tools": tools
         }
         self.session = None
         self.audio_stream = None
@@ -111,14 +116,40 @@ class AI_Core(QObject):
                 await self.out_queue_gemini.put(gemini_data)
 
     async def receive_text(self):
-        """ Receives text from Gemini and emits signals to the GUI and TTS. """
+        """ [MODIFIED] Receives text from Gemini, handles tool usage and grounding, and emits signals. """
         while self.is_running:
             try:
+                turn_urls = set()  # Keep track of unique URLs for this turn
+
                 turn = self.session.receive()
-                async for response in turn:
-                    if response.text:
-                        self.text_received.emit(response.text)
-                        await self.response_queue_tts.put(response.text)
+                async for chunk in turn:
+                    # --- MODIFIED: All complex data, including grounding, is in server_content ---
+                    if chunk.server_content:
+                        # Check for grounding metadata
+                        if hasattr(chunk.server_content, 'grounding_metadata') and chunk.server_content.grounding_metadata and chunk.server_content.grounding_metadata.grounding_chunks:
+                            for grounding_chunk in chunk.server_content.grounding_metadata.grounding_chunks:
+                                if grounding_chunk.web and grounding_chunk.web.uri:
+                                    turn_urls.add(grounding_chunk.web.uri)
+
+                        # Handle tool usage from the model
+                        model_turn = chunk.server_content.model_turn
+                        if model_turn:
+                            for part in model_turn.parts:
+                                if part.executable_code is not None:
+                                    code = part.executable_code.code
+                                    print(f"\n[Jarvis is searching for: {code}]")
+
+                    # Handle regular text responses (this is a top-level attribute)
+                    if chunk.text:
+                        self.text_received.emit(chunk.text)
+                        await self.response_queue_tts.put(chunk.text)
+
+                # At the end of the turn, emit the collected URLs
+                if turn_urls:
+                    self.search_results_received.emit(list(turn_urls))
+                else: # Emit an empty list if no urls were found for this turn
+                    self.search_results_received.emit([])
+
                 self.end_of_turn.emit()
                 await self.response_queue_tts.put(None)
             except Exception:
@@ -135,6 +166,7 @@ class AI_Core(QObject):
             await self.out_queue_gemini.put({"data": data, "mime_type": "audio/pcm"})
 
     async def send_realtime(self):
+        """ [FIXED] Reverted to the deprecated but functional `send` method to restore voice input. """
         while self.is_running:
             msg = await self.out_queue_gemini.get()
             if not self.is_running: break
@@ -142,7 +174,7 @@ class AI_Core(QObject):
             self.out_queue_gemini.task_done()
 
     async def process_text_input_queue(self):
-        """Processes text input sent from the GUI and sends it to the AI."""
+        """ Processes text input and sends it using send_client_content. """
         while self.is_running:
             text = await self.text_input_queue.get()
             if text is None:
@@ -152,7 +184,10 @@ class AI_Core(QObject):
                 print(f">>> [INFO] Sending text to AI: '{text}'")
                 for q in [self.response_queue_tts, self.audio_in_queue_player]:
                     while not q.empty(): q.get_nowait()
-                await self.session.send(input=text or ".", end_of_turn=True)
+                # Use send_client_content for explicit text turns to support tools
+                await self.session.send_client_content(
+                    turns=[{"role": "user", "parts": [{"text": text or "."}]}]
+                )
             self.text_input_queue.task_done()
 
     async def tts(self):
@@ -277,9 +312,31 @@ class MainWindow(QMainWindow):
         self.main_layout.setContentsMargins(10, 10, 10, 10)
         self.main_layout.setSpacing(10)
 
-        # --- Left Section (Blank) ---
+        # --- Left Section (Search Sources) ---
         self.left_panel = QWidget()
         self.left_panel.setStyleSheet("background-color: #3c3f41; border-radius: 5px;")
+        self.left_layout = QVBoxLayout(self.left_panel)
+        self.left_layout.setContentsMargins(10, 5, 10, 10)
+
+        self.sources_title = QLabel("Search Sources")
+        self.sources_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #a9b7c6; padding: 5px; border: none;")
+        self.left_layout.addWidget(self.sources_title)
+
+        self.sources_display = QLabel()
+        self.sources_display.setWordWrap(True)
+        self.sources_display.setAlignment(Qt.AlignTop)
+        self.sources_display.setOpenExternalLinks(True) 
+        self.sources_display.setStyleSheet("""
+            QLabel {
+                background-color: #2b2b2b;
+                color: #a9b7c6;
+                font-size: 12px;
+                border: 1px solid #555;
+                border-radius: 5px;
+                padding: 5px;
+            }
+        """)
+        self.left_layout.addWidget(self.sources_display)
         
         # --- Middle Section (Chat) ---
         self.middle_panel = QWidget()
@@ -302,7 +359,6 @@ class MainWindow(QMainWindow):
 
         # --- Right Section (Video) ---
         self.right_panel = QWidget()
-        # [FIXED] Re-add a maximum width to prevent the right panel from expanding uncontrollably.
         self.right_panel.setMaximumWidth(500)
         self.right_layout = QVBoxLayout(self.right_panel)
         
@@ -311,7 +367,7 @@ class MainWindow(QMainWindow):
         self.video_label.setAlignment(Qt.AlignCenter)
         self.right_layout.addWidget(self.video_label)
         
-        # [FIXED] Revert stretch factors to prioritize the middle panel.
+        # Revert stretch factors to prioritize the middle panel.
         self.main_layout.addWidget(self.left_panel, 1)
         self.main_layout.addWidget(self.middle_panel, 4)
         self.main_layout.addWidget(self.right_panel, 2)
@@ -331,6 +387,7 @@ class MainWindow(QMainWindow):
         self.ai_core = AI_Core(video_mode=args.mode)
         self.user_text_submitted.connect(self.ai_core.handle_user_text)
         self.ai_core.text_received.connect(self.update_text)
+        self.ai_core.search_results_received.connect(self.update_search_results)
         self.ai_core.end_of_turn.connect(self.add_newline)
         self.ai_core.frame_received.connect(self.update_frame)
         
@@ -357,6 +414,28 @@ class MainWindow(QMainWindow):
         
         self.text_display.verticalScrollBar().setValue(self.text_display.verticalScrollBar().maximum())
 
+    @Slot(list)
+    def update_search_results(self, urls):
+        """Displays the URLs from Google Search grounding in the left panel."""
+        if not urls:
+             self.sources_display.clear()
+             self.sources_title.setText("Search Sources")
+             return
+
+        # If new URLs are provided, clear the old ones and display the new set.
+        self.sources_display.setText("")
+        self.sources_title.setText("Search Sources Used")
+        
+        html_content = ""
+        for i, url in enumerate(urls):
+            try:
+                display_text = url.split('//')[1].split('/')[0]
+            except IndexError:
+                display_text = url
+
+            html_content += f'<p style="margin:0; padding: 3px;">{i+1}. <a href="{url}" style="color: #6DAEED; text-decoration: none;">{display_text}</a></p>'
+
+        self.sources_display.setText(html_content)
 
     @Slot()
     def add_newline(self):
