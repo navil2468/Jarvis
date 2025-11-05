@@ -40,14 +40,14 @@ CHUNK_SIZE = 1024
 
 # --- API Configuration ---
 MODEL = "gemini-live-2.5-flash-preview"
-DEFAULT_MODE = "camera"
-VOICE_ID = 'pFZP5JQG7iQjIQuC4Bku'
+DEFAULT_MODE = "screen"
+VOICE_ID = 'FoKAplwbWpBarMO157Q7'
 
 # --- Initialize Clients ---
 client = genai.Client(api_key=GEMINI_API_KEY)
 CONFIG = {
   "response_modalities": ["TEXT"],
-  "system_instruction": "Your name is Ada, which stands for Advanced Design Assistant. You have a joking personality and are an Ai designed to help me with engineering project as well as day to day task. Adress me as Sir and speak in a british accent. Also keep replies precise.",
+  "system_instruction": "Your name is Jarvis, which stands for Just a rather very intelligent system. You have a joking personality and are an Ai designed to help me with simple tasks on computer and occasionally programming help too. Adress me as Sir. Also keep replies precise and to the point.",
 }
 pya = pyaudio.PyAudio()
 
@@ -61,17 +61,21 @@ class AudioLoop:
         self.session = None
         self.audio_stream = None
 
+    #Storing message to session
     async def send_text(self):
         while True:
-            text = await asyncio.to_thread(input, "message > ")
-            if text.lower() == "q": break
+            text = await asyncio.to_thread(input, "Jarvis: ")
+            if text.lower() == "q": 
+                break
             for q in [self.response_queue_tts, self.audio_in_queue_player]:
                 while not q.empty(): q.get_nowait()
             await self.session.send(input=text or ".", end_of_turn=True)
 
+    #Gets a snapshot of the camera recording using opencv
     def _get_frame(self, cap):
         ret, frame = cap.read()
-        if not ret: return None
+        if not ret: 
+            return None
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img = PIL.Image.fromarray(frame_rgb)
         img.thumbnail([1024, 1024])
@@ -79,15 +83,18 @@ class AudioLoop:
         img.save(image_io, format="jpeg")
         return {"mime_type": "image/jpeg", "data": base64.b64encode(image_io.getvalue()).decode()}
 
+    #Asynchronously gets captures of video using opencv 
     async def get_frames(self):
         cap = await asyncio.to_thread(cv2.VideoCapture, 0)
         while True:
             frame = await asyncio.to_thread(self._get_frame, cap)
-            if frame is None: break
+            if frame is None: 
+                break
             await asyncio.sleep(1.0)
             await self.out_queue_gemini.put(frame)
         cap.release()
 
+    #Function for capturing screen of computer
     def _get_screen(self):
         with mss.mss() as sct:
             sct_img = sct.grab(sct.monitors[1])
@@ -96,20 +103,24 @@ class AudioLoop:
             image_io = io.BytesIO()
             img.convert("RGB").save(image_io, format="jpeg")
             return {"mime_type": "image/jpeg", "data": base64.b64encode(image_io.getvalue()).decode()}
-
+        
+    #Asynchronousy captures the computer screen every second using _get_screen
     async def get_screen(self):
         while True:
             frame = await asyncio.to_thread(self._get_screen)
-            if frame is None: break
+            if frame is None: 
+                break
             await asyncio.sleep(1.0)
             await self.out_queue_gemini.put(frame)
 
+    #Storing realtime message for Gemini
     async def send_realtime(self):
         while True:
             msg = await self.out_queue_gemini.get()
             await self.session.send(input=msg)
             self.out_queue_gemini.task_done()
 
+    #Getting Audio from computer 
     async def listen_audio(self):
         mic_info = pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
@@ -117,11 +128,12 @@ class AudioLoop:
             input=True, input_device_index=mic_info["index"], frames_per_buffer=CHUNK_SIZE
         )
         kwargs = {"exception_on_overflow": False}
-        print(">>> [INFO] Microphone is listening...")
+        print(">>> [INFO] Jarvis is listening...")
         while True:
             data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
             await self.out_queue_gemini.put({"data": data, "mime_type": "audio/pcm"})
-
+    
+    #Getting the text from Gemini
     async def receive_text(self):
         while True:
             turn = self.session.receive()
@@ -134,6 +146,7 @@ class AudioLoop:
             print()
             await self.response_queue_tts.put(None)
 
+    #Connecting to ElevenLabs to get the voice
     async def tts(self):
         uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream-input?model_id=eleven_flash_v2_5&output_format=pcm_24000"
         while True:
@@ -205,6 +218,7 @@ class AudioLoop:
                 print(f">>> [ERROR] An unexpected error occurred in the TTS task: {e}")
                 await asyncio.sleep(5)
 
+    #Playing audio received from ElevenLabs
     async def play_audio(self):
         try:
             stream = await asyncio.to_thread(
@@ -227,6 +241,7 @@ class AudioLoop:
             except Exception as e:
                 print(f">>> [ERROR] Error in audio playback loop: {e}")
 
+    #Asynchronously using stored content in class and sending it to Gemini using Gemini Live api
     async def run(self):
         try:
             async with client.aio.live.connect(model=MODEL, config=CONFIG) as session, asyncio.TaskGroup() as tg:
@@ -237,8 +252,10 @@ class AudioLoop:
                 print(">>> [INFO] Starting all tasks...")
                 send_text_task = tg.create_task(self.send_text())
                 tg.create_task(self.listen_audio())
-                if self.video_mode == "camera": tg.create_task(self.get_frames())
-                elif self.video_mode == "screen": tg.create_task(self.get_screen())
+                if self.video_mode == "camera": 
+                    tg.create_task(self.get_frames())
+                elif self.video_mode == "screen": 
+                    tg.create_task(self.get_screen())
                 tg.create_task(self.send_realtime())
                 tg.create_task(self.receive_text())
                 tg.create_task(self.tts())
