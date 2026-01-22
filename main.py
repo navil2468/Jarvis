@@ -131,9 +131,27 @@ class AI_Core(QObject):
                 },
                 "required": ["phone_no", "content"]
             }
+        }     
+        set_reminder = {
+            "name": "set_reminder",
+            "description": "Adds a reminder to reminder app on mac.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "title": {
+                        "type": "STRING",
+                        "description": "Title of the reminder."
+                    },
+                    "content": {
+                        "type": "STRING",
+                        "description": "The content or description of the reminder."
+                    }
+                },
+                "required": ["title", "content"]
+            }
         }
         
-        tools = [{'google_search': {}}, {'code_execution': {}}, {"function_declarations": [create_folder, create_file, edit_file, text_message]}]
+        tools = [{'google_search': {}}, {'code_execution': {}}, {"function_declarations": [create_folder, create_file, edit_file, text_message, set_reminder]}]
         
         self.config = {
             "generationConfig": {
@@ -217,6 +235,16 @@ class AI_Core(QObject):
         tell application "Messages"
             set targetBuddy to buddy "{phone_no}"
             send "{content}" to targetBuddy
+        end tell
+        '''
+        subprocess.run(["osascript", "-e", script])
+  
+    def _set_reminder(self, title, content):
+        script = f'''
+        tell application "Reminders"
+            tell list "{content}"
+                make new reminder with properties {{name:"{title}"}}
+            end tell
         end tell
         '''
         subprocess.run(["osascript", "-e", script])
@@ -314,6 +342,13 @@ class AI_Core(QObject):
                                 phone_no = args.get("phone_no")
                                 content = args.get("content")
                                 result = self._text_message(phone_no=phone_no, content=content)
+
+                            elif fc.name == "set_reminder":
+                                print(f"\n[Jarvis is calling function: {fc.name}]")
+                                args = fc.args
+                                title = args.get("title")
+                                content = args.get("content")
+                                result = self._set_reminder(title=title, content=content)
                             
                         print(f">>> [DEBUG] Sending tool response: {function_responses}")
                         await self.session.send_tool_response(function_responses=function_responses)
