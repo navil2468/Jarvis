@@ -350,6 +350,7 @@ class AI_Core(QObject):
                                 content = args.get("content")
                                 result = self._set_reminder(title=title, content=content)
                             
+                            
                         print(f">>> [DEBUG] Sending tool response: {function_responses}")
                         await self.session.send_tool_response(function_responses=function_responses)
                         continue
