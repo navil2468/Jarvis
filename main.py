@@ -1,4 +1,3 @@
-# --- Core Imports ---
 import asyncio
 import base64
 import io
@@ -11,21 +10,19 @@ import argparse
 import threading
 from html import escape
 
-# --- PySide6 GUI Imports ---
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QLabel,
                                QVBoxLayout, QWidget, QLineEdit, QHBoxLayout,
                                QSizePolicy)
 from PySide6.QtCore import QObject, Signal, Slot, Qt
 from PySide6.QtGui import QImage, QPixmap, QFont, QFontDatabase, QTextCursor
 
-# --- Media and AI Imports ---
 import cv2
 import pyaudio
 import PIL.Image
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
-# --- Load Environment Variables ---
 load_dotenv()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -35,28 +32,19 @@ if not GEMINI_API_KEY:
 if not ELEVENLABS_API_KEY:
     sys.exit("Error: ELEVENLABS_API_KEY not found. Please check your .env file.")
 
-# --- Configuration ---
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
-MODEL = "gemini-live-2.5-flash-preview"
+MODEL = "gemini-2.0-flash-exp"
 VOICE_ID = 'FoKAplwbWpBarMO157Q7'
 DEFAULT_MODE = "screen"
 MAX_OUTPUT_TOKENS = 100
 
-# --- Initialize Clients ---
 pya = pyaudio.PyAudio()
 
-# ==============================================================================
-# AI BACKEND LOGIC
-# ==============================================================================
 class AI_Core(QObject):
-    """
-    Handles all backend operations. Inherits from QObject to emit signals
-    for thread-safe communication with the GUI.
-    """
     text_received = Signal(str)
     end_of_turn = Signal()
     frame_received = Signal(QImage)
@@ -67,7 +55,10 @@ class AI_Core(QObject):
         super().__init__()
         self.video_mode = video_mode
         self.is_running = True
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        self.client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(api_version='v1beta'),
+            )
 
         create_folder = {
             "name": "create_folder",
@@ -125,16 +116,18 @@ class AI_Core(QObject):
         tools = [{'google_search': {}}, {'code_execution': {}}, {"function_declarations": [create_folder, create_file, edit_file]}]
         
         self.config = {
-            "response_modalities": ["TEXT"],
-            "system_instruction": """You have access to tools for searching, code execution, and file system actions.
-1.  For information or questions, use `Google Search`.
-2.  For math or running python code, use `code_execution`.
-3.  If the user asks to create a directory or folder, you must use the `create_folder` function.
-4.  If the user asks to create a file with content, you must use the `create_file` function.
-5.  If the user asks to add to, append, or edit an existing file, you must use the `edit_file` function.
-Prioritize the most appropriate tool for the user's specific request.""",
+            "generationConfig": {
+                "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                "responseModalities": ["TEXT"],
+            },
             "tools": tools,
-            "max_output_tokens": MAX_OUTPUT_TOKENS
+            "systemInstruction": """You are an assitant named Jarvis. You have access to tools for searching, code execution, and file system actions. You can hear the user and see their screen/camera.
+                1.  For information or questions, use `Google Search`.
+                2.  For math or running python code, use `code_execution`.
+                3.  If the user asks to create a directory or folder, you must use the `create_folder` function.
+                4.  If the user asks to create a file with content, you must use the `create_file` function.
+                5.  If the user asks to add to, append, or edit an existing file, you must use the `edit_file` function.
+                Prioritize the most appropriate tool for the user's specific request.""",
         }
         self.session = None
         self.audio_stream = None
@@ -146,8 +139,8 @@ Prioritize the most appropriate tool for the user's specific request.""",
         self.tasks = []
         self.loop = asyncio.new_event_loop()
 
+    #Creates a folder at the specified path and returns a status dictionary.
     def _create_folder(self, folder_path):
-        """Creates a folder at the specified path and returns a status dictionary."""
         try:
             if not folder_path or not isinstance(folder_path, str):
                 return {"status": "error", "message": "Invalid folder path provided."}
@@ -163,8 +156,8 @@ Prioritize the most appropriate tool for the user's specific request.""",
             print(f">>> [FUNCTION ERROR] Failed to create folder '{folder_path}': {e}")
             return {"status": "error", "message": f"An error occurred: {str(e)}"}
 
+    #Creates a file with the specified content and returns a status dictionary.
     def _create_file(self, file_path, content):
-        """Creates a file with the specified content and returns a status dictionary."""
         try:
             if not file_path or not isinstance(file_path, str):
                 return {"status": "error", "message": "Invalid file path provided."}
@@ -181,8 +174,8 @@ Prioritize the most appropriate tool for the user's specific request.""",
             print(f">>> [FUNCTION ERROR] Failed to create file '{file_path}': {e}")
             return {"status": "error", "message": f"An error occurred while creating the file: {str(e)}"}
 
+    #Appends content to an existing file and returns a status dictionary.
     def _edit_file(self, file_path, content):
-        """Appends content to an existing file and returns a status dictionary."""
         try:
             if not file_path or not isinstance(file_path, str):
                 return {"status": "error", "message": "Invalid file path provided."}
@@ -199,8 +192,8 @@ Prioritize the most appropriate tool for the user's specific request.""",
             print(f">>> [FUNCTION ERROR] Failed to edit file '{file_path}': {e}")
             return {"status": "error", "message": f"An error occurred while editing the file: {str(e)}"}
 
+    #Streams camera feed to GUI at high FPS and stores the latest frame.
     async def stream_camera_to_gui(self):
-        """Streams camera feed to GUI at high FPS and stores the latest frame."""
         cap = await asyncio.to_thread(cv2.VideoCapture, 0)
         while self.is_running:
             ret, frame = await asyncio.to_thread(cap.read)
@@ -218,8 +211,8 @@ Prioritize the most appropriate tool for the user's specific request.""",
         cap.release()
         print(">>> [INFO] Camera stream stopped.")
 
+    #Periodically sends the latest frame to Gemini at 1 FPS.
     async def send_frames_to_gemini(self):
-        """Periodically sends the latest frame to Gemini at 1 FPS."""
         while self.is_running:
             await asyncio.sleep(1.0)
             if self.latest_frame is not None:
@@ -232,10 +225,8 @@ Prioritize the most appropriate tool for the user's specific request.""",
                 gemini_data = {"mime_type": "image/jpeg", "data": base64.b64encode(image_io.getvalue()).decode()}
                 await self.out_queue_gemini.put(gemini_data)
 
+    #Receives text and tool calls, handles them correctly, and emits signals to the GUI.
     async def receive_text(self):
-        """ 
-        Receives text and tool calls, handles them correctly, and emits signals to the GUI.
-        """
         while self.is_running:
             try:
                 turn_urls = set()
@@ -291,7 +282,7 @@ Prioritize the most appropriate tool for the user's specific request.""",
                         await self.session.send_tool_response(function_responses=function_responses)
                         continue
 
-                    # --- 2. Handle Other Server Content (Search, Code Execution) ---
+                    # Handle Other Server Content (Search, Code Execution) 
                     if chunk.server_content:
                         if (hasattr(chunk.server_content, 'grounding_metadata') and
                                 chunk.server_content.grounding_metadata and
@@ -315,12 +306,12 @@ Prioritize the most appropriate tool for the user's specific request.""",
                                     print(f"[Code execution result received]")
                                     turn_code_result = part.code_execution_result.output
                     
-                    # --- 3. Handle Regular Text Response ---
+                    # Handle Regular Text Response 
                     if chunk.text:
                         self.text_received.emit(chunk.text)
                         await self.response_queue_tts.put(chunk.text)
 
-                # --- End-of-turn logic to display tool activity ---
+                # End-of-turn logic to display tool activity 
                 if turn_code_content:
                     self.code_being_executed.emit(turn_code_content, turn_code_result)
                     self.search_results_received.emit([])
@@ -466,12 +457,10 @@ Prioritize the most appropriate tool for the user's specific request.""",
             self.audio_stream.stop_stream()
             self.audio_stream.close()
 
-# ==============================================================================
 # STYLED GUI APPLICATION
-# ==============================================================================
 class MainWindow(QMainWindow):
     user_text_submitted = Signal(str)
-
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("J.a.r.v.i.s")
@@ -499,7 +488,7 @@ class MainWindow(QMainWindow):
         self.main_layout.setContentsMargins(15, 15, 15, 15)
         self.main_layout.setSpacing(15)
 
-        # --- Left Section (Tool Activity) ---
+        # Left Section (Tool Activity) 
         self.left_panel = QWidget()
         self.left_panel.setObjectName("left_panel")
         self.left_layout = QVBoxLayout(self.left_panel)
@@ -515,7 +504,7 @@ class MainWindow(QMainWindow):
         self.tool_activity_display.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.left_layout.addWidget(self.tool_activity_display, 1)
         
-        # --- Middle Section (Chat) ---
+        # Middle Section (Chat) 
         self.middle_panel = QWidget()
         self.middle_panel.setObjectName("middle_panel")
         self.middle_layout = QVBoxLayout(self.middle_panel)
@@ -535,7 +524,7 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.input_box)
         self.middle_layout.addWidget(input_container)
 
-        # --- Right Section (Video) ---
+        # Right Section (Video) 
         self.right_panel = QWidget()
         self.right_panel.setObjectName("right_panel")
         self.right_layout = QVBoxLayout(self.right_panel)
@@ -642,9 +631,7 @@ class MainWindow(QMainWindow):
         self.ai_core.stop()
         event.accept()
 
-# ==============================================================================
 # MAIN EXECUTION
-# ==============================================================================
 if __name__ == "__main__":
     try:
         app = QApplication(sys.argv)
