@@ -19,6 +19,7 @@ from PySide6.QtGui import QImage, QPixmap, QFont, QFontDatabase, QTextCursor
 import cv2
 import pyaudio
 import PIL.Image
+import subprocess
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -41,6 +42,7 @@ MODEL = "gemini-2.0-flash-exp"
 VOICE_ID = 'FoKAplwbWpBarMO157Q7'
 DEFAULT_MODE = "screen"
 MAX_OUTPUT_TOKENS = 100
+
 
 pya = pyaudio.PyAudio()
 
@@ -112,8 +114,26 @@ class AI_Core(QObject):
                 "required": ["file_path", "content"]
             }
         }
+        text_message = {
+            "name": "text_message",
+            "description": "Texts message to given number using macOS subprocess.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "phone_no": {
+                        "type": "STRING",
+                        "description": "The phone number to send the message to."
+                    },
+                    "content": {
+                        "type": "STRING",
+                        "description": "The content to message."
+                    }
+                },
+                "required": ["phone_no", "content"]
+            }
+        }
         
-        tools = [{'google_search': {}}, {'code_execution': {}}, {"function_declarations": [create_folder, create_file, edit_file]}]
+        tools = [{'google_search': {}}, {'code_execution': {}}, {"function_declarations": [create_folder, create_file, edit_file, text_message]}]
         
         self.config = {
             "generationConfig": {
@@ -191,6 +211,16 @@ class AI_Core(QObject):
         except Exception as e:
             print(f">>> [FUNCTION ERROR] Failed to edit file '{file_path}': {e}")
             return {"status": "error", "message": f"An error occurred while editing the file: {str(e)}"}
+    
+    def _text_message(self, phone_no, content):
+        script = f'''
+        tell application "Messages"
+            set targetBuddy to buddy "{phone_no}"
+            send "{content}" to targetBuddy
+        end tell
+        '''
+        subprocess.run(["osascript", "-e", script])
+
 
     #Streams camera feed to GUI at high FPS and stores the latest frame.
     async def stream_camera_to_gui(self):
@@ -277,7 +307,14 @@ class AI_Core(QObject):
                                     "name": fc.name,
                                     "response": result
                                 })
-                        
+                            
+                            elif fc.name == "text_message":
+                                print(f"\n[Jarvis is calling function: {fc.name}]")
+                                args = fc.args
+                                phone_no = args.get("phone_no")
+                                content = args.get("content")
+                                result = self._text_message(phone_no=phone_no, content=content)
+                            
                         print(f">>> [DEBUG] Sending tool response: {function_responses}")
                         await self.session.send_tool_response(function_responses=function_responses)
                         continue
